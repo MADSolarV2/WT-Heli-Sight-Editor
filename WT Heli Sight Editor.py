@@ -134,7 +134,7 @@ def vromfs_unpack(path: str) -> dict:
     for i in range(n):
         str_off = struct.unpack_from('<I', body, fn_off + i * 8)[0]
         end     = body.index(b'\x00', str_off)
-        name    = body[str_off:end].decode('utf-8')
+        name    = body[str_off:end].decode('utf-8', errors='replace')
         offset  = struct.unpack_from('<I', body, fd_off + i * 16)[0]
         size    = struct.unpack_from('<I', body, fd_off + i * 16 + 4)[0]
         result[name] = body[offset:offset + size]
