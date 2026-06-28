@@ -20,7 +20,7 @@ War Thunder's helicopter rocket sight is drawn entirely in Squirrel script using
 
 ## Requirements
 
-- **Python** (3.8 or newer) — [python.org](https://www.python.org/downloads/)
+- **Python** (3.10 or newer) — [python.org](https://www.python.org/downloads/)
 - **War Thunder** installed anywhere (auto-detected via Steam; if that fails, use the `…` button in the editor to browse to your War Thunder folder manually)
 - The `zstandard` package — **auto-installs on first run**, no manual steps needed
 

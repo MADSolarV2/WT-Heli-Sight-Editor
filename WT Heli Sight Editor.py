@@ -217,7 +217,9 @@ def patch_nut(nut: str, elements: list, r: int, g: int, b: int) -> str:
     elem_lines = ',\n'.join('    ' + e.squirrel() for e in elements)
     new_func = (
         'function helicopterRocketSightMode(sightMode) {\n'
-        '  return [\n' + elem_lines + '\n  ]\n}')
+        '  return [\n'
+        f'    [VECTOR_COLOR, Color({r}, {g}, {b}, 255)],\n'
+        + elem_lines + '\n  ]\n}')
     marker = 'function helicopterRocketSightMode(sightMode)'
     start = nut.find(marker)
     if start == -1:
@@ -249,6 +251,105 @@ def patch_nut(nut: str, elements: list, r: int, g: int, b: int) -> str:
             seg = re.sub(r'\bfillColor\s*=\s*Color\(\d+,\s*\d+,\s*\d+,\s*\d+\)',
                          f'fillColor = Color({r}, {g}, {b}, 255)', seg, count=1)
             nut = nut[:a0] + seg + nut[a1:]
+    return nut
+
+
+def _find_block_end(text: str, start: int) -> int:
+    """Return index just past the closing } of the outermost braced block after start."""
+    depth = 0; i = start
+    while i < len(text):
+        if text[i] == '{': depth += 1
+        elif text[i] == '}':
+            depth -= 1
+            if depth == 0: return i + 1
+        i += 1
+    return -1
+
+
+def patch_nav_elements(nut: str) -> str:
+    """Minimize nav elements: outer crosses, tiny centre dot, hidden velocity element.
+
+    airHorizonZeroLevel:   two horizontal bars → two small + crosses at the outer edges.
+                           The large centre gap is preserved; crosses sit at the far left
+                           and right ends where the bars used to terminate at the edge.
+    airHorizon:            W-shaped seagull → tiny filled dot at canvas centre (no roll).
+                           rx=1%,ry=4% → ~1.6px radius in a [4h,h] element at h=40px.
+    horizontalSpeedVector: C++ ROBJ_HELICOPTER_HORIZONTAL_SPEED → hidden zero-size element.
+    """
+    # 1. Static horizon bars → crosses at outer edges
+    #    Element is [4*height, height]. In canvas % coords: 1% X = 0.04h px, 1% Y = 0.01h px.
+    #    Cross arms: horizontal 0-8% (6.4px span), vertical 40-60% (8px span) — near-equal.
+    hz_marker = 'function airHorizonZeroLevel(elemStyle, height, color)'
+    hz_start = nut.find(hz_marker)
+    if hz_start != -1:
+        hz_end = _find_block_end(nut, hz_start)
+        if hz_end != -1:
+            new_hz = (
+                'function airHorizonZeroLevel(elemStyle, height, color) {\n'
+                '  return elemStyle.__merge({\n'
+                '    rendObj = ROBJ_VECTOR_CANVAS\n'
+                '    color\n'
+                '    size = [4 * height, height]\n'
+                '    commands = [\n'
+                '      [VECTOR_LINE, 0, 50, 8, 50],\n'
+                '      [VECTOR_LINE, 4, 40, 4, 60],\n'
+                '      [VECTOR_LINE, 92, 50, 100, 50],\n'
+                '      [VECTOR_LINE, 96, 40, 96, 60],\n'
+                '    ]\n'
+                '  })\n'
+                '}'
+            )
+            nut = nut[:hz_start] + new_hz + nut[hz_end:]
+
+    # 2. Seagull wings → tiny centre dot (no roll transform — it's a point, rotation is moot)
+    h_marker = 'function airHorizon(elemStyle, height, color)'
+    h_start = nut.find(h_marker)
+    if h_start != -1:
+        h_end = _find_block_end(nut, h_start)
+        if h_end != -1:
+            # Unfilled ring at minimum integer radii: rx=1% of 4h == ry=4% of h → equal pixel
+            # radius (~1.6px at h=40px). No VECTOR_FILL_COLOR so only the 1px outline draws.
+            new_horizon = (
+                'function airHorizon(elemStyle, height, color) {\n'
+                '  return elemStyle.__merge({\n'
+                '    rendObj = ROBJ_VECTOR_CANVAS\n'
+                '    size = [4 * height, height]\n'
+                '    color\n'
+                '    commands = [\n'
+                '      [VECTOR_ELLIPSE, 50, 50, 1, 4],\n'
+                '    ]\n'
+                '    behavior = Behaviors.RecalcHandler\n'
+                '    function onRecalcLayout(_initial, elem) {\n'
+                '      if (!hudUnitType.isHelicopter())\n'
+                '        return\n'
+                '      if (elem.getWidth() > 1 && elem.getHeight() > 1)\n'
+                '        eventbus_send("update_helicopter_hud_aabb_state", {\n'
+                '          partName = "attitudeIndicator"\n'
+                '          pos = [elem.getScreenPosX(), elem.getScreenPosY()]\n'
+                '          size = [4 * height, height]\n'
+                '          visible = IsMainHudVisible.get()\n'
+                '        })\n'
+                '      else\n'
+                '        eventbus_send("update_helicopter_hud_aabb_state", { partName = "attitudeIndicator" })\n'
+                '    }\n'
+                '  })\n'
+                '}'
+            )
+            nut = nut[:h_start] + new_horizon + nut[h_end:]
+
+    # 3. Velocity arrow (C++ native renderer) → hidden zero-size element
+    v_marker = 'function horizontalSpeedVector(elemStyle, color, height)'
+    v_start = nut.find(v_marker)
+    if v_start != -1:
+        v_end = _find_block_end(nut, v_start)
+        if v_end != -1:
+            new_vel = (
+                'function horizontalSpeedVector(elemStyle, color, height) {\n'
+                '  return { size = [0, 0] }\n'
+                '}'
+            )
+            nut = nut[:v_start] + new_vel + nut[v_end:]
+
     return nut
 
 
@@ -377,6 +478,7 @@ class Editor:
         self.color: tuple         = (0, 255, 65)
         self.tool                 = tk.StringVar(value='select')
         self._snap                = tk.BooleanVar(value=False)
+        self._minimize_nav        = tk.BooleanVar(value=False)
         self._snap_sz             = tk.StringVar(value='10')
         self._profile_var         = tk.StringVar()
         self.wt_dir               = tk.StringVar(value=_find_wt_dir())
@@ -525,6 +627,8 @@ class Editor:
         self._status = ttk.Label(right, text="Ready.", wraplength=235,
                                   font=('Segoe UI', 8))
         self._status.pack(anchor='w')
+        ttk.Checkbutton(right, text="Minimize nav elements",
+                        variable=self._minimize_nav).pack(anchor='w', pady=(4, 0))
         ttk.Button(right, text="Export → War Thunder",
                    command=self._export).pack(fill='x', pady=(4, 2))
         ttk.Button(right, text="Restore Game Default (Remove Mod)",
@@ -1092,6 +1196,8 @@ class Editor:
             nut = files[nut_key].decode('utf-8', errors='replace')
             ri, gi, bi = self.color
             nut = patch_nut(nut, self.elements, ri, gi, bi)
+            if self._minimize_nav.get():
+                nut = patch_nav_elements(nut)
             nut_bytes = nut.encode('utf-8')
             files['reactivegui/airHudElems.nut'] = nut_bytes
             files['reactivegui/airhudelems.nut'] = nut_bytes
